@@ -3,6 +3,6 @@ services:
     name: resqmesh-command-center
     env: python
     buildCommand: ""
-    startCommand: "python3 SOS-p2p/dashboard/server.py"
+    startCommand: "python3 dashboard/server.py"
     plan: free
     healthCheckPath: /api/alerts
