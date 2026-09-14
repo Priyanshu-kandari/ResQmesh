@@ -199,7 +199,7 @@ fun ProfileScreen(
                         isGatewaySaved = false
                     },
                     label = { Text("Server URL") },
-                    placeholder = { Text("https://resqmesh-command-center.onrender.com") },
+                    placeholder = { Text("https://resqmesh-fd8l.onrender.com") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(

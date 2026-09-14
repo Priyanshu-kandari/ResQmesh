@@ -34,12 +34,12 @@ class PreferencesManager(context: Context) {
         set(value) = prefs.edit().putString("user_phone", value).apply()
 
     var gatewayUrl: String
-        get() = prefs.getString("gateway_url", "https://column-favourites-mixer-mia.trycloudflare.com/api/alerts") ?: "https://column-favourites-mixer-mia.trycloudflare.com/api/alerts"
+        get() = prefs.getString("gateway_url", "https://resqmesh-fd8l.onrender.com/api/alerts") ?: "https://resqmesh-fd8l.onrender.com/api/alerts"
         set(value) = prefs.edit().putString("gateway_url", value).apply()
 
     fun getEffectiveGatewayUrl(): String {
         val raw = gatewayUrl.trim().removeSuffix("/")
-        if (raw.isEmpty()) return "https://column-favourites-mixer-mia.trycloudflare.com/api/alerts"
+        if (raw.isEmpty()) return "https://resqmesh-fd8l.onrender.com/api/alerts"
         return if (raw.endsWith("/api/alerts")) raw else "$raw/api/alerts"
     }
 
