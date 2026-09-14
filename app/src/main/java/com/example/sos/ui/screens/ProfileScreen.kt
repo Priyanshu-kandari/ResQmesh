@@ -21,12 +21,16 @@ fun ProfileScreen(
     deviceId: String,
     initialName: String,
     initialPhone: String,
+    initialGatewayUrl: String,
     isLocationEnabled: Boolean,
     onSaveProfile: (name: String, phone: String) -> Unit,
+    onSaveGatewayUrl: (url: String) -> Unit,
     onOpenDiagnostics: () -> Unit
 ) {
     var name by remember { mutableStateOf(initialName) }
     var phone by remember { mutableStateOf(initialPhone) }
+    var gatewayUrl by remember { mutableStateOf(initialGatewayUrl) }
+    var isGatewaySaved by remember { mutableStateOf(false) }
     var isEditing by remember { mutableStateOf(false) }
     var isSavedConfirmation by remember { mutableStateOf(false) }
 
@@ -161,6 +165,74 @@ fun ProfileScreen(
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Notifications", style = MaterialTheme.typography.bodyLarge, color = TextPrimary)
                     Text("Enabled", style = MaterialTheme.typography.bodyMedium, color = StatusConnected)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(18.dp))
+
+        // Operations Center Gateway URL Card
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            color = SurfaceCard,
+            border = androidx.compose.foundation.BorderStroke(1.dp, BorderSubtle)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Incident Command Center URL",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = "Cloud dashboard endpoint where intermediate gateway nodes upload mesh distress packets.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
+                )
+
+                OutlinedTextField(
+                    value = gatewayUrl,
+                    onValueChange = {
+                        gatewayUrl = it
+                        isGatewaySaved = false
+                    },
+                    label = { Text("Server URL") },
+                    placeholder = { Text("https://resqmesh-command-center.onrender.com") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = NetworkBlue,
+                        unfocusedBorderColor = BorderSubtle,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isGatewaySaved) {
+                        Text("✓ Saved & active", color = StatusConnected, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    } else {
+                        Spacer(modifier = Modifier.width(1.dp))
+                    }
+
+                    Button(
+                        onClick = {
+                            onSaveGatewayUrl(gatewayUrl.trim())
+                            isGatewaySaved = true
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = NetworkBlue)
+                    ) {
+                        Text("Save URL", color = BackgroundNavy, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }

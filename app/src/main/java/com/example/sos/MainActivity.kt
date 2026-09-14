@@ -119,6 +119,7 @@ class MainActivity : ComponentActivity() {
         cloudSyncManager = CloudSyncManager(
             context = this,
             repository = repository,
+            preferences = preferences,
             onLog = { addLog(it) }
         )
 
@@ -284,10 +285,15 @@ class MainActivity : ComponentActivity() {
                                         deviceId = preferences.deviceId,
                                         initialName = preferences.userName,
                                         initialPhone = preferences.userPhone,
+                                        initialGatewayUrl = preferences.gatewayUrl,
                                         isLocationEnabled = isLocationReady.value,
                                         onSaveProfile = { n, p ->
                                             preferences.saveProfile(n, preferences.userAge, p)
                                             addLog("Profile updated: ${preferences.userName}")
+                                        },
+                                        onSaveGatewayUrl = { url ->
+                                            preferences.gatewayUrl = url
+                                            addLog("Command Center URL updated: $url")
                                         },
                                         onOpenDiagnostics = {
                                             showDiagnosticsScreen = true

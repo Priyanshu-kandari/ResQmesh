@@ -20,6 +20,7 @@ import com.google.firebase.database.FirebaseDatabase
 class CloudSyncManager(
     private val context: Context,
     private val repository: MessageRepository,
+    private val preferences: com.example.sos.data.PreferencesManager,
     private val onLog: (String) -> Unit
 ) {
     private var database: DatabaseReference? = null
@@ -102,7 +103,7 @@ class CloudSyncManager(
         }, 4000)
     }
 
-    private val gatewayUrl = "http://192.168.0.106:8081/api/alerts"
+    private fun getGatewayUrl(): String = preferences.getEffectiveGatewayUrl()
 
     /**
      * Polls the Emergency Operations Center to check if authority has triaged,
@@ -111,7 +112,7 @@ class CloudSyncManager(
     fun pollAuthorityUpdates() {
         Thread {
             try {
-                val url = java.net.URL(gatewayUrl)
+                val url = java.net.URL(getGatewayUrl())
                 val conn = url.openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 3000
@@ -210,14 +211,15 @@ class CloudSyncManager(
     private fun uploadToRestGateway(msg: com.example.sos.model.EmergencyMessage, onResult: (Boolean) -> Unit) {
         Thread {
             var success = false
+            val currentUrl = getGatewayUrl()
             try {
-                val url = java.net.URL(gatewayUrl)
+                val url = java.net.URL(currentUrl)
                 val conn = url.openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
                 conn.doOutput = true
-                conn.connectTimeout = 3000
-                conn.readTimeout = 3000
+                conn.connectTimeout = 4000
+                conn.readTimeout = 4000
 
                 val jsonPayload = org.json.JSONObject().apply {
                     put("messageId", msg.messageId)
@@ -244,10 +246,13 @@ class CloudSyncManager(
                 val responseCode = conn.responseCode
                 if (responseCode in 200..299) {
                     success = true
+                } else {
+                    mainHandler.post { onLog("⚠️ Gateway HTTP $responseCode from $currentUrl") }
                 }
                 conn.disconnect()
             } catch (e: Exception) {
                 Log.d("ResQMesh", "REST gateway sync: ${e.message}")
+                mainHandler.post { onLog("⚠️ Cloud sync error: ${e.localizedMessage ?: e.message}") }
             }
             mainHandler.post { onResult(success) }
         }.start()

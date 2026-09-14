@@ -33,6 +33,16 @@ class PreferencesManager(context: Context) {
         get() = prefs.getString("user_phone", "") ?: ""
         set(value) = prefs.edit().putString("user_phone", value).apply()
 
+    var gatewayUrl: String
+        get() = prefs.getString("gateway_url", "https://column-favourites-mixer-mia.trycloudflare.com/api/alerts") ?: "https://column-favourites-mixer-mia.trycloudflare.com/api/alerts"
+        set(value) = prefs.edit().putString("gateway_url", value).apply()
+
+    fun getEffectiveGatewayUrl(): String {
+        val raw = gatewayUrl.trim().removeSuffix("/")
+        if (raw.isEmpty()) return "https://column-favourites-mixer-mia.trycloudflare.com/api/alerts"
+        return if (raw.endsWith("/api/alerts")) raw else "$raw/api/alerts"
+    }
+
     var isRegistered: Boolean
         get() = prefs.getBoolean("is_registered", false)
         set(value) = prefs.edit().putBoolean("is_registered", value).apply()
