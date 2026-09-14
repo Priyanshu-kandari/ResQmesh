@@ -1,3 +1,5 @@
 <resources>
-    <string name="app_name">SOS</string>
+    <string name="app_name">ResQMesh</string>
+    <string name="app_tagline">Emergency communication when the network fails</string>
+    <string name="app_subtitle">When infrastructure fails, nearby phones become the network.</string>
 </resources>

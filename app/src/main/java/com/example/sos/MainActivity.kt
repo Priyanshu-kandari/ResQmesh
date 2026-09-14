@@ -1,83 +1,65 @@
 package com.example.sos
 
 import android.Manifest
-import android.content.Context
-import android.content.SharedPreferences
+import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.widget.Toast
-//Bluettoth support
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.le.AdvertiseCallback
-import android.bluetooth.le.AdvertiseData
-import android.bluetooth.le.AdvertiseSettings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.example.sos.ui.theme.SOSTheme
+import android.content.Context
+import android.content.Intent
+import android.location.LocationManager
+import android.provider.Settings
+import com.example.sos.data.MessageRepository
+import com.example.sos.data.PreferencesManager
+import com.example.sos.model.EmergencyMessage
+import com.example.sos.network.CloudSyncManager
+import com.example.sos.network.MeshNetworkManager
+import com.example.sos.ui.screens.*
+import com.example.sos.ui.theme.*
+import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
-import com.google.android.gms.nearby.Nearby
-import com.google.android.gms.nearby.connection.*
+import com.google.android.gms.location.Priority
 import java.text.SimpleDateFormat
 import java.util.*
 
 class MainActivity : ComponentActivity() {
 
-    // --- VARIABLES ---
-    private var isAdvertising = false
-    private lateinit var database: com.google.firebase.database.DatabaseReference
-    private lateinit var prefs: SharedPreferences // To store user data locally
+    private lateinit var preferences: PreferencesManager
+    private lateinit var repository: MessageRepository
+    private lateinit var networkManager: MeshNetworkManager
+    private lateinit var cloudSyncManager: CloudSyncManager
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
 
-    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val switchRoleRunnable = object : Runnable {
-        override fun run() {
-            if (connectedEndpoints.isNotEmpty()) return
-            stopAllEndpoints()
-            if (isAdvertising) {
-                addLog("🔄 Switching to DISCOVERY Mode...")
-                startDiscovery()
-            } else {
-                addLog("🔄 Switching to ADVERTISING Mode...")
-                startAdvertising()
-            }
-            isAdvertising = !isAdvertising
-            handler.postDelayed(this, 12000)
-        }
-    }
-
-    private fun stopAllEndpoints() {
-        connectionsClient.stopAdvertising()
-        connectionsClient.stopDiscovery()
-    }
-
-    private val SERVICE_ID = "sos_mesh_v2"
-    private val connectionsClient by lazy { Nearby.getConnectionsClient(this) }
-    private lateinit var fusedLocationClient: com.google.android.gms.location.FusedLocationProviderClient
-
-    private val connectedEndpoints = mutableSetOf<String>()
-    private val receivedMessages = mutableSetOf<String>()
-    private val storedSOSMessages = mutableListOf<String>()
     private val logMessages = mutableStateListOf<String>()
+    private val locationText = mutableStateOf("Checking GPS...")
+    private val isLocationReady = mutableStateOf(false)
+    private val isGpsEnabled = mutableStateOf(false)
+    private var lastLat = 0.0
+    private var lastLng = 0.0
+    private var lastAccuracy = 0f
 
     private val requiredPermissions = when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
@@ -111,354 +93,490 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         if (permissions.entries.all { it.value }) {
-            addLog("Permissions Granted. Starting Mesh...")
-            startMeshNetwork()
+            addLog("All mesh and location permissions granted.")
+            networkManager.startMesh()
+            fetchLocation()
         } else {
-            addLog("❌ Permissions Missing!")
-            Toast.makeText(this, "Permissions needed", Toast.LENGTH_LONG).show()
+            addLog("Some permissions denied. Nearby mesh might be restricted.")
+            networkManager.startMesh()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 1. Initialize Storage & Firebase
-        prefs = getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
-        database = com.google.firebase.database.FirebaseDatabase.getInstance().reference
+        preferences = PreferencesManager(this)
+        repository = MessageRepository(preferences.deviceId)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
-        addLog("App Started. Initializing...")
-        checkAndRequestPermissions()
+        networkManager = MeshNetworkManager(
+            context = this,
+            deviceId = preferences.deviceId,
+            repository = repository,
+            onLog = { addLog(it) }
+        )
 
-        // Background Upload Logic
-        android.os.Handler(mainLooper).postDelayed(object : Runnable {
-            override fun run() {
-                if (isInternetAvailable() && storedSOSMessages.isNotEmpty()) {
-                    addLog("Internet found. Attempting upload...")
-                    uploadSOSMessages()
-                }
-                android.os.Handler(mainLooper).postDelayed(this, 10000)
-            }
-        }, 10000)
+        cloudSyncManager = CloudSyncManager(
+            context = this,
+            repository = repository,
+            onLog = { addLog(it) }
+        )
+
+        addLog("ResQMesh node initialized: ${preferences.deviceId}")
+        checkAndRequestPermissions()
 
         setContent {
             SOSTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    // 2. CHECK: Is User Registered?
-                    var isRegistered by remember { mutableStateOf(prefs.getBoolean("is_registered", false)) }
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    var selectedTab by remember { mutableIntStateOf(0) }
+                    var showConfirmationDialog by remember { mutableStateOf(false) }
+                    var sentAlertId by remember { mutableStateOf<String?>(null) }
+                    var showDiagnosticsScreen by remember { mutableStateOf(false) }
 
-                    if (isRegistered) {
-                        // Show Main SOS Screen
-                        EmergencyScreen(
+                    if (showConfirmationDialog) {
+                        SosConfirmationDialog(
+                            locationText = locationText.value,
+                            isLocationReady = isLocationReady.value,
+                            isGpsEnabled = isGpsEnabled.value,
+                            onOpenLocationSettings = {
+                                startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                            },
+                            onConfirm = { p, m, h ->
+                                showConfirmationDialog = false
+                                val newId = triggerEmergencySos(p, m, h)
+                                sentAlertId = newId
+                            },
+                            onDismiss = { showConfirmationDialog = false }
+                        )
+                    }
+
+                    sentAlertId?.let { id ->
+                        SosSentDialog(
+                            messageId = id,
+                            peerCount = networkManager.connectedDevices.size,
+                            onDismiss = { sentAlertId = null }
+                        )
+                    }
+
+                    if (showDiagnosticsScreen) {
+                        DiagnosticsScreen(
+                            deviceId = preferences.deviceId,
+                            meshRole = networkManager.currentRole.value,
+                            isOnline = cloudSyncManager.isOnline.value,
+                            isBleActive = networkManager.isBleBroadcasting.value,
+                            connectedPeersCount = networkManager.connectedDevices.size,
+                            pendingQueueCount = repository.pendingPeerQueue.size,
                             logMessages = logMessages,
-                            onSendSOS = { p, m, h -> sendSOS(p, m, h) }
+                            onBack = { showDiagnosticsScreen = false },
+                            onSimulatePhoneA = { simulatePhoneASos() },
+                            onSimulatePhoneB = { simulatePhoneBRelay() },
+                            onSimulatePhoneC = { simulatePhoneCDelivery() },
+                            onSimulateCloudSync = { simulateCloudSync() },
+                            onResetDemo = { repository.clear(); addLog("Test queue reset.") }
                         )
                     } else {
-                        // Show Sign Up Screen First
-                        SignUpScreen(
-                            onRegister = { name, age, phone ->
-                                // Save Data Permanently
-                                with(prefs.edit()) {
-                                    putString("user_name", name)
-                                    putString("user_age", age)
-                                    putString("user_phone", phone)
-                                    putBoolean("is_registered", true)
-                                    apply()
+                        Scaffold(
+                            bottomBar = {
+                                NavigationBar(
+                                    containerColor = SurfaceDark,
+                                    tonalElevation = 6.dp
+                                ) {
+                                    // 1. HOME TAB
+                                    NavigationBarItem(
+                                        selected = selectedTab == 0,
+                                        onClick = { selectedTab = 0 },
+                                        icon = {
+                                            HomeNavIcon(selected = selectedTab == 0)
+                                        },
+                                        label = { Text("Home", fontSize = 11.sp, fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal) },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedTextColor = TextPrimary,
+                                            unselectedTextColor = TextMuted,
+                                            indicatorColor = SurfaceElevated
+                                        )
+                                    )
+
+                                    // 2. MESH TAB
+                                    NavigationBarItem(
+                                        selected = selectedTab == 1,
+                                        onClick = { selectedTab = 1 },
+                                        icon = {
+                                            MeshNavIcon(selected = selectedTab == 1)
+                                        },
+                                        label = { Text("Mesh", fontSize = 11.sp, fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal) },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedTextColor = TextPrimary,
+                                            unselectedTextColor = TextMuted,
+                                            indicatorColor = SurfaceElevated
+                                        )
+                                    )
+
+                                    // 3. ALERTS TAB
+                                    NavigationBarItem(
+                                        selected = selectedTab == 2,
+                                        onClick = { selectedTab = 2 },
+                                        icon = {
+                                            AlertsNavIcon(selected = selectedTab == 2)
+                                        },
+                                        label = { Text("Alerts", fontSize = 11.sp, fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal) },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedTextColor = TextPrimary,
+                                            unselectedTextColor = TextMuted,
+                                            indicatorColor = SurfaceElevated
+                                        )
+                                    )
+
+                                    // 4. PROFILE TAB
+                                    NavigationBarItem(
+                                        selected = selectedTab == 3,
+                                        onClick = { selectedTab = 3 },
+                                        icon = {
+                                            ProfileNavIcon(selected = selectedTab == 3)
+                                        },
+                                        label = { Text("Profile", fontSize = 11.sp, fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal) },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedTextColor = TextPrimary,
+                                            unselectedTextColor = TextMuted,
+                                            indicatorColor = SurfaceElevated
+                                        )
+                                    )
                                 }
-                                isRegistered = true // Switch Screen
-                                addLog("✅ User Registered: $name")
                             }
-                        )
+                        ) { innerPadding ->
+                            Box(modifier = Modifier.padding(innerPadding)) {
+                                when (selectedTab) {
+                                    0 -> HomeScreen(
+                                        deviceId = preferences.deviceId,
+                                        isOnline = cloudSyncManager.isOnline.value,
+                                        peerCount = networkManager.connectedDevices.size,
+                                        locationText = locationText.value,
+                                        isLocationReady = isLocationReady.value,
+                                        recentAlertText = if (repository.messageHistory.isNotEmpty()) {
+                                            val top = repository.messageHistory[0]
+                                            when (top.status) {
+                                                "RESOLVED" -> "✓ Rescued  •  Incident resolved"
+                                                "IN_PROGRESS" -> "🚨 Dispatched: ${top.assignedUnit ?: "Rescue squad"} en route"
+                                                "SYNCED" -> "Delivered to command center (${top.getFormattedTime()})"
+                                                "CREATED" -> "Broadcasting SOS: ${top.hazardType} (${top.getFormattedTime()})"
+                                                else -> "${top.status}: ${top.hazardType} (${top.getFormattedTime()})"
+                                            }
+                                        } else {
+                                            "SOS ready  •  No active emergency"
+                                        },
+                                        onPressSos = {
+                                            checkLocationProviderState()
+                                            fetchLocation()
+                                            showConfirmationDialog = true
+                                        }
+                                    )
+                                    1 -> MeshScreen(
+                                        deviceId = preferences.deviceId,
+                                        peers = networkManager.connectedDevices,
+                                        messagesRelayed = repository.relayedCount.intValue
+                                    )
+                                    2 -> AlertsScreen(
+                                        messages = repository.messageHistory
+                                    )
+                                    3 -> ProfileScreen(
+                                        deviceId = preferences.deviceId,
+                                        initialName = preferences.userName,
+                                        initialPhone = preferences.userPhone,
+                                        isLocationEnabled = isLocationReady.value,
+                                        onSaveProfile = { n, p ->
+                                            preferences.saveProfile(n, preferences.userAge, p)
+                                            addLog("Profile updated: ${preferences.userName}")
+                                        },
+                                        onOpenDiagnostics = {
+                                            showDiagnosticsScreen = true
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    // --- HELPER FUNCTIONS ---
+    override fun onDestroy() {
+        super.onDestroy()
+        networkManager.stopMesh()
+    }
+
     private fun addLog(msg: String) {
         val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-        runOnUiThread { logMessages.add(0, "[$time] $msg") }
-        Log.d("SOS_APP", msg)
+        runOnUiThread {
+            logMessages.add(0, "[$time] $msg")
+            if (logMessages.size > 80) logMessages.removeLast()
+        }
+        Log.d("ResQMesh", msg)
     }
 
     private fun checkAndRequestPermissions() {
-        val missingPermissions = requiredPermissions.filter {
+        val missing = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missingPermissions.isEmpty()) {
-            startMeshNetwork()
+        if (missing.isEmpty()) {
+            networkManager.startMesh()
+            checkLocationProviderState()
+            fetchLocation()
         } else {
-            permissionLauncher.launch(missingPermissions.toTypedArray())
+            permissionLauncher.launch(missing.toTypedArray())
         }
     }
 
-    private fun startMeshNetwork() {
-        addLog("🚀 Starting Auto-Mesh Search...")
-        handler.post(switchRoleRunnable)
-    }
-
-    // --- NEARBY CONNECTIONS LOGIC ---
-    private fun startAdvertising() {
-        val options = AdvertisingOptions.Builder().setStrategy(Strategy.P2P_STAR).setLowPower(false).build()
-        connectionsClient.startAdvertising("SOS_User", SERVICE_ID, connectionLifecycleCallback, options)
-            .addOnFailureListener { addLog("❌ Advertising Failed: ${it.message}") }
-    }
-
-    private fun startDiscovery() {
-        val options = DiscoveryOptions.Builder().setStrategy(Strategy.P2P_STAR).setLowPower(false).build()
-        connectionsClient.startDiscovery(SERVICE_ID, endpointDiscoveryCallback, options)
-            .addOnFailureListener { addLog("❌ Discovery Failed: ${it.message}") }
-    }
-
-    private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
-        override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
-            addLog("👀 Found Device: ${info.endpointName}")
-            connectionsClient.requestConnection("SOS_User", endpointId, connectionLifecycleCallback)
-        }
-        override fun onEndpointLost(endpointId: String) {}
-    }
-
-    private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
-        override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
-            connectionsClient.acceptConnection(endpointId, payloadCallback)
-        }
-        override fun onConnectionResult(endpointId: String, result: ConnectionResolution) {
-            if (result.status.isSuccess) {
-                connectedEndpoints.add(endpointId)
-                addLog("✅ Connected to $endpointId")
-                handler.removeCallbacks(switchRoleRunnable)
-
-                if (storedSOSMessages.isNotEmpty()) {
-                    for (savedMsg in storedSOSMessages) {
-                        connectionsClient.sendPayload(endpointId, Payload.fromBytes(savedMsg.toByteArray()))
-                    }
-                }
-            }
-        }
-        override fun onDisconnected(endpointId: String) {
-            connectedEndpoints.remove(endpointId)
-            if (connectedEndpoints.isEmpty()) handler.post(switchRoleRunnable)
+    override fun onResume() {
+        super.onResume()
+        checkLocationProviderState()
+        if (isGpsEnabled.value) {
+            fetchLocation()
         }
     }
 
-    //Bluetooth Fun
-    @android.annotation.SuppressLint("MissingPermission")
-    private fun startBleSosBeacon(name: String, count: String, med: String, haz: String) {
-        val bluetoothAdapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
-        val advertiser = bluetoothAdapter?.bluetoothLeAdvertiser
-
-        if (advertiser == null) return
-
-        val settings = android.bluetooth.le.AdvertiseSettings.Builder()
-            .setAdvertiseMode(android.bluetooth.le.AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            .setTxPowerLevel(android.bluetooth.le.AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-            .setConnectable(false)
-            .build()
-
-        // 1. Truncate strings so they fit in the tiny 24-byte BLE limit!
-        val safeName = name.take(7) // Max 7 chars
-        val safeCount = count.take(2) // Max 2 chars
-        val safeMed = med.take(6)   // Max 6 chars
-        val safeHaz = haz.take(6)   // Max 6 chars
-
-        // Format: "Name,Count,Med,Hazard"
-        val payloadString = "$safeName,$safeCount,$safeMed,$safeHaz"
-        val payloadBytes = payloadString.toByteArray()
-
-        addLog("⚙️ BLE Payload String: [$payloadString] (${payloadBytes.size} bytes)")
-
-        val data = android.bluetooth.le.AdvertiseData.Builder()
-            .addManufacturerData(0x02E5, payloadBytes)
-            .build()
-
-        val advertiseCallback = object : android.bluetooth.le.AdvertiseCallback() {
-            override fun onStartSuccess(settingsInEffect: android.bluetooth.le.AdvertiseSettings) {
-                addLog("📡 BLE Hardware Beacon Actively Broadcasting!")
-            }
-            override fun onStartFailure(errorCode: Int) {
-                addLog("❌ BLE Beacon Failed: $errorCode")
-            }
+    private fun checkLocationProviderState(): Boolean {
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val enabled = try {
+            locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+            locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        } catch (e: Exception) {
+            false
         }
-
-        advertiser.startAdvertising(settings, data, advertiseCallback)
-
-        handler.postDelayed({
-            advertiser.stopAdvertising(advertiseCallback)
-        }, 30000)
-    }
-
-    private val payloadCallback = object : PayloadCallback() {
-        override fun onPayloadReceived(endpointId: String, payload: Payload) {
-            val message = String(payload.asBytes()!!)
-            addLog("📩 RECEIVED: $message")
-            Toast.makeText(this@MainActivity, "SOS Received!", Toast.LENGTH_SHORT).show()
-
-            if (!receivedMessages.contains(message)) {
-                receivedMessages.add(message)
-                storedSOSMessages.add(message)
-                forwardMessage(message, endpointId)
-                if (isInternetAvailable()) uploadSOSMessages()
-            }
+        isGpsEnabled.value = enabled
+        if (!enabled) {
+            isLocationReady.value = false
+            locationText.value = "Location Disabled (Turn on GPS)"
         }
-        override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {}
+        return enabled
     }
 
-    private fun isInternetAvailable(): Boolean {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val network = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(network) ?: return false
-        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
-
-    private fun uploadSOSMessages() {
-        val iterator = storedSOSMessages.iterator()
-        while (iterator.hasNext()) {
-            val message = iterator.next()
-            val key = database.child("sos_alerts").push().key
-            if (key != null) {
-                val sosData = mapOf("message" to message, "timestamp" to System.currentTimeMillis())
-                database.child("sos_alerts").child(key).setValue(sosData)
-                    .addOnSuccessListener { addLog("☁️ Firebase Upload Success") }
-            }
-            iterator.remove()
-        }
-    }
-
-    private fun forwardMessage(message: String, senderEndpoint: String) {
-        val payload = Payload.fromBytes(message.toByteArray())
-        for (endpoint in connectedEndpoints) {
-            if (endpoint != senderEndpoint) {
-                connectionsClient.sendPayload(endpoint, payload)
-            }
-        }
-    }
-
-    // --- MAIN LOGIC: SENDING SOS WITH USER DATA ---
-    private fun sendSOS(rawPeople: String, rawMedical: String, rawHazard: String) {
-        val peopleCount = if (rawPeople.isBlank()) "1" else rawPeople
-        val medicalCondition = if (rawMedical.isBlank()) "None" else rawMedical
-        val hazardType = if (rawHazard.isBlank()) "Unknown" else rawHazard
-
-        // 1. RETRIEVE SAVED USER DATA
-        val name = prefs.getString("user_name", "Unknown") ?: "Unknown"
-        val age = prefs.getString("user_age", "?") ?: "?"
-        val phone = prefs.getString("user_phone", "No Phone") ?: "No Phone"
-
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            addLog("❌ Location Permission Missing")
+    @SuppressLint("MissingPermission")
+    private fun fetchLocation() {
+        if (!checkLocationProviderState()) {
+            locationText.value = "Location Disabled (Turn on GPS)"
+            isLocationReady.value = false
             return
         }
 
-        fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-            val lat = location?.latitude ?: 0.0
-            val lng = location?.longitude ?: 0.0
-            val time = System.currentTimeMillis()
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            locationText.value = "Permission Denied"
+            isLocationReady.value = false
+            return
+        }
 
-            //Bluettoth
-            startBleSosBeacon(name, peopleCount, medicalCondition, hazardType)
-
-            val msgId = java.util.UUID.randomUUID().toString().substring(0, 8)
-
-
-            // 2. BUILD PACKET WITH USER INFO
-            // Format: ID | SOS | Lat | Lng | Time | Name | Age | Ph | Ppl | Med | Haz
-            val sosMessage = "$msgId|SOS|Lat:$lat|Lng:$lng|Time:$time|Name:$name|Age:$age|Ph:$phone|Ppl:$peopleCount|Med:$medicalCondition|Haz:$hazardType"
-
-            addLog("🚨 PACKING: $sosMessage")
-
-            if (!receivedMessages.contains(sosMessage)) {
-                receivedMessages.add(sosMessage)
-                storedSOSMessages.add(sosMessage)
-            }
-
-            val payload = Payload.fromBytes(sosMessage.toByteArray())
-            if (connectedEndpoints.isEmpty()) {
-                addLog("⚠️ No peers. Stored locally.")
+        fusedLocationClient.lastLocation.addOnSuccessListener { loc ->
+            if (loc != null && loc.latitude != 0.0) {
+                lastLat = loc.latitude
+                lastLng = loc.longitude
+                lastAccuracy = loc.accuracy
+                isLocationReady.value = true
+                locationText.value = "${String.format("%.4f", lastLat)}, ${String.format("%.4f", lastLng)} (±${lastAccuracy.toInt()}m)"
             } else {
-                for (endpoint in connectedEndpoints) {
-                    connectionsClient.sendPayload(endpoint, payload)
-                }
+                locationText.value = "Acquiring GPS fix..."
+                fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+                    .addOnSuccessListener { freshLoc ->
+                        if (freshLoc != null && freshLoc.latitude != 0.0) {
+                            lastLat = freshLoc.latitude
+                            lastLng = freshLoc.longitude
+                            lastAccuracy = freshLoc.accuracy
+                            isLocationReady.value = true
+                            locationText.value = "${String.format("%.4f", lastLat)}, ${String.format("%.4f", lastLng)} (±${lastAccuracy.toInt()}m)"
+                        } else {
+                            locationText.value = "Searching for satellites..."
+                        }
+                    }
             }
-        }.addOnFailureListener { addLog("❌ Failed to get location") }
-    }
-
-    // --- UI COMPONENTS ---
-
-    @Composable
-    fun SignUpScreen(onRegister: (String, String, String) -> Unit) {
-        var name by remember { mutableStateOf("") }
-        var age by remember { mutableStateOf("") }
-        var phone by remember { mutableStateOf("") }
-
-        Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text("Create SOS Profile", style = MaterialTheme.typography.headlineMedium, color = Color.Black)
-            Text("This info will be sent to rescuers.", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
-
-            Spacer(modifier = Modifier.height(30.dp))
-
-            OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Full Name") }, modifier = Modifier.fillMaxWidth())
-            Spacer(modifier = Modifier.height(10.dp))
-            OutlinedTextField(value = age, onValueChange = { age = it }, label = { Text("Age") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-            Spacer(modifier = Modifier.height(10.dp))
-            OutlinedTextField(value = phone, onValueChange = { phone = it }, label = { Text("Phone Number") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone), modifier = Modifier.fillMaxWidth())
-
-            Spacer(modifier = Modifier.height(30.dp))
-
-            Button(
-                onClick = { if (name.isNotBlank() && phone.isNotBlank()) onRegister(name, age, phone) },
-                modifier = Modifier.fillMaxWidth().height(50.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color.Blue)
-            ) {
-                Text("Save Profile", fontSize = 18.sp)
-            }
+        }.addOnFailureListener {
+            locationText.value = "GPS Error"
+            isLocationReady.value = false
         }
     }
 
-    @Composable
-    fun StatusLogBox(messages: List<String>) {
-        Column(
-            modifier = Modifier.fillMaxWidth().height(200.dp).background(Color.Black.copy(alpha = 0.8f), RoundedCornerShape(8.dp)).padding(8.dp)
-        ) {
-            Text("Logs:", color = Color.White)
-            LazyColumn {
-                items(messages) { msg ->
-                    Text(text = msg, fontSize = 12.sp, color = if (msg.contains("❌")) Color.Red else Color.White)
-                    HorizontalDivider(color = Color.DarkGray)
-                }
-            }
+    private fun triggerEmergencySos(rawPeople: String, rawMedical: String, rawHazard: String): String {
+        fetchLocation()
+
+        val people = if (rawPeople.isBlank()) "1" else rawPeople
+        val medical = if (rawMedical.isBlank()) "None" else rawMedical
+        val hazard = if (rawHazard.isBlank()) "General Emergency" else rawHazard
+
+        val msgId = "RQ-" + UUID.randomUUID().toString().substring(0, 6).uppercase()
+
+        val alert = EmergencyMessage(
+            messageId = msgId,
+            senderId = preferences.deviceId,
+            timestamp = System.currentTimeMillis(),
+            latitude = lastLat,
+            longitude = lastLng,
+            locationAccuracy = lastAccuracy,
+            messageType = "SOS",
+            priority = "CRITICAL",
+            hopCount = 0,
+            originDevice = preferences.deviceId,
+            lastRelayDevice = preferences.deviceId,
+            status = "CREATED",
+            peopleCount = people,
+            medicalNeeds = medical,
+            hazardType = hazard,
+            senderName = preferences.userName,
+            senderPhone = preferences.userPhone
+        )
+
+        addLog("SOS alert created: [${alert.messageId}] Hazard: $hazard")
+
+        repository.addCreatedMessage(alert)
+        networkManager.broadcastMessage(alert)
+        networkManager.startBleSosBeacon(alert)
+
+        if (cloudSyncManager.isOnline.value) {
+            cloudSyncManager.syncPendingMessages()
+        }
+
+        return msgId
+    }
+
+    // SIH Demo Simulator actions
+    private fun simulatePhoneASos() {
+        val demoAlert = EmergencyMessage(
+            messageId = "RQ-" + (1000..9999).random(),
+            senderId = "PHONE-A",
+            timestamp = System.currentTimeMillis(),
+            latitude = 28.6139,
+            longitude = 77.2090,
+            locationAccuracy = 4f,
+            messageType = "SOS",
+            priority = "CRITICAL",
+            hopCount = 0,
+            originDevice = "PHONE-A",
+            lastRelayDevice = "PHONE-A",
+            status = "CREATED",
+            peopleCount = "2",
+            medicalNeeds = "Severe Bleeding",
+            hazardType = "Flash Flood",
+            senderName = "Rahul Sharma",
+            senderPhone = "+91 9811002233"
+        )
+        repository.addCreatedMessage(demoAlert)
+        addLog("[SIM] Phone A: Created emergency alert [${demoAlert.messageId}]")
+    }
+
+    private fun simulatePhoneBRelay() {
+        val latest = repository.messageHistory.firstOrNull()
+        if (latest != null) {
+            val relayed = latest.copy(
+                hopCount = latest.hopCount + 1,
+                lastRelayDevice = "PHONE-B (Relay)",
+                status = "RELAYED"
+            )
+            repository.messageHistory[0] = relayed
+            repository.relayedCount.intValue += 1
+            addLog("[SIM] Phone B: Relayed alert [${relayed.messageId}] (Hop ${relayed.hopCount})")
+        } else {
+            addLog("[SIM] Trigger Phone A SOS first before relaying.")
         }
     }
 
-    @Composable
-    fun EmergencyScreen(logMessages: List<String>, onSendSOS: (String, String, String) -> Unit) {
-        var peopleInput by remember { mutableStateOf("") }
-        var medicalInput by remember { mutableStateOf("") }
-        var hazardInput by remember { mutableStateOf("") }
-
-        Column(modifier = Modifier.fillMaxSize().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.SpaceBetween) {
-            Column(modifier = Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                Text("EMERGENCY MODE", style = MaterialTheme.typography.headlineLarge, color = Color.Red)
-                Spacer(modifier = Modifier.height(20.dp))
-                OutlinedTextField(value = peopleInput, onValueChange = { peopleInput = it }, label = { Text("People Count") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = medicalInput, onValueChange = { medicalInput = it }, label = { Text("Medical Needs") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = hazardInput, onValueChange = { hazardInput = it }, label = { Text("Hazard Type") }, modifier = Modifier.fillMaxWidth())
-                Spacer(modifier = Modifier.height(20.dp))
-                Button(
-                    onClick = {
-                        onSendSOS(peopleInput, medicalInput, hazardInput)
-                        peopleInput = ""; medicalInput = ""; hazardInput = ""
-                    },
-                    modifier = Modifier.size(150.dp),
-                    shape = CircleShape,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
-                ) { Text("SOS", fontSize = 24.sp, color = Color.White) }
-            }
-            StatusLogBox(messages = logMessages)
+    private fun simulatePhoneCDelivery() {
+        val latest = repository.messageHistory.firstOrNull()
+        if (latest != null) {
+            val delivered = latest.copy(
+                status = "RECEIVED",
+                lastRelayDevice = "PHONE-C (Gateway)"
+            )
+            repository.messageHistory[0] = delivered
+            addLog("[SIM] Phone C: Gateway received multi-hop alert [${delivered.messageId}]")
+        } else {
+            addLog("[SIM] No alert found to deliver.")
         }
+    }
+
+    private fun simulateCloudSync() {
+        val latest = repository.messageHistory.firstOrNull()
+        if (latest != null) {
+            repository.markMessageSynced(latest.messageId)
+            addLog("[SIM] Internet Restored: Synced [${latest.messageId}] to Command Center")
+        } else {
+            addLog("[SIM] No alert found to sync.")
+        }
+    }
+}
+
+// Clean Vector Navigation Icons (No emojis, no extra dependencies)
+@Composable
+private fun HomeNavIcon(selected: Boolean) {
+    val tint = if (selected) EmergencyRed else TextMuted
+    Canvas(modifier = Modifier.size(20.dp)) {
+        val w = size.width
+        val h = size.height
+        val path = Path().apply {
+            moveTo(w * 0.5f, h * 0.15f)
+            lineTo(w * 0.85f, h * 0.45f)
+            lineTo(w * 0.85f, h * 0.85f)
+            lineTo(w * 0.15f, h * 0.85f)
+            lineTo(w * 0.15f, h * 0.45f)
+            close()
+        }
+        drawPath(path, color = tint, style = Stroke(width = 2.dp.toPx()))
+    }
+}
+
+@Composable
+private fun MeshNavIcon(selected: Boolean) {
+    val tint = if (selected) NetworkBlue else TextMuted
+    Canvas(modifier = Modifier.size(20.dp)) {
+        val w = size.width
+        val h = size.height
+        // 3 connected nodes
+        val c1 = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.25f)
+        val c2 = androidx.compose.ui.geometry.Offset(w * 0.2f, h * 0.75f)
+        val c3 = androidx.compose.ui.geometry.Offset(w * 0.8f, h * 0.75f)
+
+        drawLine(color = tint, start = c1, end = c2, strokeWidth = 1.8.dp.toPx())
+        drawLine(color = tint, start = c1, end = c3, strokeWidth = 1.8.dp.toPx())
+        drawLine(color = tint, start = c2, end = c3, strokeWidth = 1.8.dp.toPx())
+
+        drawCircle(color = tint, radius = 3.dp.toPx(), center = c1)
+        drawCircle(color = tint, radius = 3.dp.toPx(), center = c2)
+        drawCircle(color = tint, radius = 3.dp.toPx(), center = c3)
+    }
+}
+
+@Composable
+private fun AlertsNavIcon(selected: Boolean) {
+    val tint = if (selected) StatusConnected else TextMuted
+    Canvas(modifier = Modifier.size(20.dp)) {
+        val w = size.width
+        val h = size.height
+        // Clean notification bell path
+        val path = Path().apply {
+            moveTo(w * 0.5f, h * 0.15f)
+            lineTo(w * 0.75f, h * 0.55f)
+            lineTo(w * 0.85f, h * 0.7f)
+            lineTo(w * 0.15f, h * 0.7f)
+            lineTo(w * 0.25f, h * 0.55f)
+            close()
+        }
+        drawPath(path, color = tint, style = Stroke(width = 1.8.dp.toPx()))
+        drawCircle(color = tint, radius = 1.8.dp.toPx(), center = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.85f))
+    }
+}
+
+@Composable
+private fun ProfileNavIcon(selected: Boolean) {
+    val tint = if (selected) TextPrimary else TextMuted
+    Canvas(modifier = Modifier.size(20.dp)) {
+        val w = size.width
+        val h = size.height
+        // Head
+        drawCircle(color = tint, radius = 3.5.dp.toPx(), center = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.35f), style = Stroke(width = 1.8.dp.toPx()))
+        // Shoulders
+        val path = Path().apply {
+            moveTo(w * 0.2f, h * 0.85f)
+            cubicTo(w * 0.2f, h * 0.6f, w * 0.8f, h * 0.6f, w * 0.8f, h * 0.85f)
+        }
+        drawPath(path, color = tint, style = Stroke(width = 1.8.dp.toPx()))
     }
 }
